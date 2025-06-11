@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run:*)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/test_agent.py::TestMemoryIntegration::test_memory_clear -v)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/test_agent.py::TestClapTrapAgent::test_process_message_basic -v)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/ -k \"not trio\" --tb=short)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/test_youtube_summary.py::TestYouTubeSummaryTool::test_get_transcript_no_subtitles -v)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/test_agent.py::TestClapTrapAgent::test_process_message_basic -v -s)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/ -k \"not trio\" --tb=short -q)",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=\"\" uv run --frozen pytest tests/test_agent.py::TestClapTrapAgent::test_agent_initialization -v)"
+    ],
+    "deny": []
+  }
+}
