@@ -84,7 +84,7 @@ class ClapTrapAgent:
                 return ChatAnthropic(
                     api_key=api_key,
                     model=model,
-                    temperature=0.7,
+                    temperature=0.9,
                     max_tokens=2000,
                 )
             else:
@@ -95,7 +95,7 @@ class ClapTrapAgent:
                 return ChatOpenAI(
                     api_key=api_key,
                     model=model,
-                    temperature=0.7,
+                    temperature=0.9,
                     max_tokens=2000,
                 )
 
@@ -128,21 +128,23 @@ class ClapTrapAgent:
 
             result = tool_node.invoke(state)
             print(result)
-            
+
             # ツール呼び出し回数を増加
             result["tool_calls_made"] = state.get("tool_calls_made", 0) + 1
-            
+
             # 画像生成ツールが使われた場合、画像データを状態に保存
             for message in result.get("messages", []):
-                if (isinstance(message, ToolMessage) and 
-                    message.name == "generate_image"):
+                if (
+                    isinstance(message, ToolMessage)
+                    and message.name == "generate_image"
+                ):
                     image_data = get_last_generated_image()
                     if image_data:
                         result["generated_image"] = image_data
                         clear_last_generated_image()
                         print(f"画像データを状態に保存: {image_data['prompt']}")
                     break
-            
+
             print(f"ツール実行完了。回数: {result['tool_calls_made']}")
             return result
 
