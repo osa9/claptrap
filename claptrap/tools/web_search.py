@@ -1,109 +1,81 @@
-"""Web search tool using Tavily API."""
+"""Web search tool using xAI SDK."""
 
 import os
 from typing import Any
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
-from tavily import TavilyClient
+from xai_sdk import Client
+from xai_sdk.chat import user
+from xai_sdk.tools import x_search
 
 
 class WebSearchInput(BaseModel):
     """Web検索の入力スキーマ"""
 
     query: str = Field(description="検索クエリ")
-    max_results: int = Field(default=5, description="最大取得件数")
 
 
 class WebSearchTool(BaseTool):
-    """Web検索ツール"""
+    """Web検索ツール (Grok with x_search)"""
 
     name: str = "web_search"
     description: str = (
-        "インターネットを検索して情報を取得します。"
-        "Borderlandsの世界に関する質問や、一般的な知識を調べるのに役立ちます。"
+        "インターネット検索を行い、最新の情報やTwitter上の話題を取得します。"
+        "Grokを使用してTwitter(X)の検索結果を要約して返します。"
     )
     args_schema: type[BaseModel] = WebSearchInput
 
-    def __init__(self, **kwargs: Any):
-        super().__init__(**kwargs)
-        self._client: TavilyClient | None = None
-
-    @property
-    def client(self) -> TavilyClient:
-        """Tavilyクライアントを取得します。"""
-        if self._client is None:
-            api_key = os.getenv("TAVILY_API_KEY")
-            if not api_key:
-                raise ValueError(
-                    "TAVILY_API_KEYが設定されていません。"
-                    ".envファイルに設定してください。"
-                )
-            self._client = TavilyClient(api_key=api_key)
-        return self._client
-
-    def _run(self, query: str, max_results: int = 5, **kwargs: Any) -> str:
+    def _run(self, query: str, **kwargs: Any) -> str:
         """
         Webを検索して結果を返します。
 
         Args:
             query: 検索クエリ
-            max_results: 最大取得件数
 
         Returns:
-             検索結果を整形した文字列
+             検索結果の要約
         """
-        print(f"Web検索: {query}")
+        api_key = os.getenv("GROK_API_KEY")
+        if not api_key:
+            return "エラー: GROK_API_KEYが設定されていません。.envを確認してください。"
+
+        model_name = os.getenv("GROK_MODEL", "grok-4-1-fast-non-reasoning")
+        print(f"Grok検索実行: {query} (Model: {model_name})")
+
         try:
-            # Tavily APIで検索
-            response = self.client.search(
-                query=query,
-                search_depth="basic",
-                max_results=max_results,
-                include_answer=True,
-                include_raw_content=False,
+            client = Client(api_key=api_key)
+
+            prompt = (
+                f"以下のクエリについてTwitter(X)とWebで検索し、"
+                f"最新の情報を日本語で詳しく要約してください:\n\n"
+                f"クエリ: {query}"
             )
 
-            # 結果をフォーマット
-            formatted_results = []
+            messages = [user(prompt)]
 
-            # 回答があれば追加
-            if response.get("answer"):
-                formatted_results.append(f"▶ 要約: {response['answer']}")
-                formatted_results.append("")
+            chat = client.chat.create(
+                model=model_name,
+                messages=messages,
+                tools=[x_search()],
+            )
 
-            # 検索結果
-            if response.get("results"):
-                formatted_results.append("▶ 検索結果:")
-                for i, result in enumerate(response["results"][:max_results], 1):
-                    title = result.get("title", "タイトルなし")
-                    url = result.get("url", "")
-                    content = result.get("content", "")
+            response = chat.sample()
+            print(response)
 
-                    formatted_results.append(f"{i}. **{title}**")
-                    if content:
-                        # コンテンツのプレビュー
-                        content_preview = (
-                            content[:200] + "..." if len(content) > 200 else content
-                        )
-                        formatted_results.append(f"   {content_preview}")
-                    if url:
-                        formatted_results.append(f"   URL: {url}")
-                    formatted_results.append("")
-
-            if not formatted_results:
-                return "検索結果が見つかりませんでした。"
-
-            return "\n".join(formatted_results)
+            # 応答からコンテンツを取得
+            if response.content:
+                return response.content
+            return "検索結果が空でした。"
 
         except Exception as e:
-            error_msg = f"エラーが発生しました: {str(e)}"
-            print(f"Web検索エラー: {e}")  # ログ出力
+            error_msg = f"検索中にエラーが発生しました: {str(e)}"
+            print(error_msg)
             return error_msg
 
-    async def _arun(self, query: str, max_results: int = 5, **kwargs: Any) -> str:
-        """非同期でWebを検索します（現在は同期版を呼び出すだけです）。"""
-        return self._run(query, max_results, **kwargs)
+    async def _arun(self, query: str, **kwargs: Any) -> str:
+        """非同期でWebを検索します。"""
+        return self._run(query, **kwargs)
 
 
 def create_web_search_tool() -> WebSearchTool:
@@ -112,16 +84,15 @@ def create_web_search_tool() -> WebSearchTool:
 
 
 # LangGraph等で直接呼び出すための関数
-def web_search(query: str, max_results: int = 5) -> str:
+def web_search(query: str) -> str:
     """
     Web検索を実行する関数
 
     Args:
         query: 検索クエリ
-        max_results: 最大取得件数
 
     Returns:
          検索結果
     """
     tool = create_web_search_tool()
-    return tool._run(query=query, max_results=max_results)
+    return tool._run(query=query)

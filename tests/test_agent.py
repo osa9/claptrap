@@ -18,7 +18,9 @@ class TestClapTrapAgent:
             {
                 "ANTHROPIC_API_KEY": "test_key",
                 "OPENAI_API_KEY": "test_openai_key",
-                "TAVILY_API_KEY": "test_tavily_key",
+                "GROK_API_KEY": "test_grok_key",
+                "VENICE_API_KEY": "test_venice_key",
+                "GEMINI_API_KEY": "test_gemini_key",
             },
         ):
             yield
@@ -26,7 +28,7 @@ class TestClapTrapAgent:
     @pytest.fixture
     def agent(self, mock_env_vars):
         """テスト用のエージェントインスタンス"""
-        with patch("claptrap.agent.ChatAnthropic"):
+        with patch("claptrap.agent.ChatAnthropic"), patch("claptrap.agent.ChatOpenAI"):
             return ClapTrapAgent(memory_db_path=":memory:")
 
     def test_agent_initialization(self, agent):
@@ -39,7 +41,7 @@ class TestClapTrapAgent:
 
     def test_get_agent_singleton(self, mock_env_vars):
         """グローバルエージェントのシングルトンテスト"""
-        with patch("claptrap.agent.ChatAnthropic"):
+        with patch("claptrap.agent.ChatAnthropic"), patch("claptrap.agent.ChatOpenAI"):
             agent1 = get_agent()
             agent2 = get_agent()
             assert agent1 is agent2
@@ -59,7 +61,7 @@ class TestClapTrapAgent:
                 "こんにちは", "channel_123", "user_456"
             )
 
-            assert "こんにちはだっぺ〜！" in response
+            assert "こんにちはだっぺ〜！" in response.text
 
     @pytest.mark.anyio
     async def test_process_message_error_handling(self, agent):
@@ -69,20 +71,26 @@ class TestClapTrapAgent:
                 "テストメッセージ", "channel_123", "user_456"
             )
 
-            assert "バグったのだ" in response
+            assert "バグったのだ" in response.text
 
     @pytest.mark.anyio
     async def test_process_user_message_function(self, mock_env_vars):
         """便利関数のテスト"""
+        from claptrap.agent import AgentResponse
+
         mock_agent = Mock()
-        mock_agent.process_message = AsyncMock(return_value="テスト応答")
+        mock_agent.process_message = AsyncMock(
+            return_value=AgentResponse(
+                text="テスト応答", channel_id="channel_123", user_id="user_456"
+            )
+        )
 
         with patch("claptrap.agent.get_agent", return_value=mock_agent):
             response = await process_user_message(
                 "テストメッセージ", "channel_123", "user_456"
             )
 
-            assert response == "テスト応答"
+            assert response.text == "テスト応答"
             mock_agent.process_message.assert_called_once_with(
                 "テストメッセージ", "channel_123", "user_456"
             )
@@ -99,7 +107,7 @@ class TestMemoryIntegration:
             {
                 "ANTHROPIC_API_KEY": "test_key",
                 "OPENAI_API_KEY": "test_openai_key",
-                "TAVILY_API_KEY": "test_tavily_key",
+                "GROK_API_KEY": "test_grok_key",
             },
         ):
             yield

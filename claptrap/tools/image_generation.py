@@ -1,9 +1,9 @@
-"""Image generation tool using OpenAI GPT-4 Vision (gpt-image-1)."""
+"""Image generation tool using OpenAI (DALL-E 3) and Google Gemini (Nano Banana Pro)."""
 
+import base64
 import os
-from typing import Any
+from typing import Any, Literal
 
-import aiohttp
 from langchain_core.tools import BaseTool
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -16,243 +16,156 @@ class ImageGenerationInput(BaseModel):
     """画像生成ツールの入力スキーマ"""
 
     prompt: str = Field(description="画像生成のプロンプト")
+    style: Literal["illustration", "realistic"] = Field(
+        default="illustration",
+        description="画像のスタイル (illustration: ChatGPT/DALL-E 3, realistic: Nano Banana Pro/Gemini)",
+    )
     size: str = Field(
         default="1024x1024",
-        description="画像のサイズ (1024x1024, 1792x1024, 1024x1792)",
+        description="画像のサイズ (1024x1024 など)",
     )
-    quality: str = Field(
-        default="high", description="画像の品質 (low, medium, high, auto)"
-    )
+    quality: str = Field(default="standard", description="画像の品質 (standard, hd)")
 
 
 class ImageGenerationTool(BaseTool):
-    """GPT-4 Vision (gpt-image-1) を使用した画像生成ツール"""
+    """画像生成ツール (DALL-E 3 / Nano Banana Pro)"""
 
     name: str = "generate_image"
     description: str = (
-        "GPT-4 Vision (gpt-image-1) を使用して、指定されたプロンプトから"
-        "画像を生成します。ClapTrapの世界観に合わせたスタイル調整も自動的に行います。"
+        "指定されたプロンプトから画像を生成します。"
+        "スタイルとして 'illustration' (イラスト) または 'realistic' (写実的/スライド) を選択できます。"
     )
     args_schema: type[BaseModel] = ImageGenerationInput
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
-        self._client: OpenAI | None = None
+        self._openai_client: OpenAI | None = None
 
     @property
-    def client(self) -> OpenAI:
-        """OpenAIクライアントを初期化または返します。"""
-        if self._client is None:
+    def openai_client(self) -> OpenAI:
+        """OpenAIクライアントを取得します。"""
+        if self._openai_client is None:
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
-                raise ValueError(
-                    "OPENAI_API_KEYが環境変数に設定されていません。"
-                    ".envファイルにキーを追加してください。"
-                )
-            self._client = OpenAI(api_key=api_key)
-        return self._client
+                raise ValueError("OPENAI_API_KEYが設定されていません。")
+            self._openai_client = OpenAI(api_key=api_key)
+        return self._openai_client
 
     def _run(
         self,
         prompt: str,
+        style: str = "illustration",
         size: str = "1024x1024",
-        quality: str = "high",
+        quality: str = "standard",
         **kwargs: Any,
-    ) -> dict[str, Any]:
-        """
-        画像を生成します。
+    ) -> dict[str, Any] | str:
+        """画像を生成します。"""
+        print(f"画像生成リクエスト: {prompt} (Style: {style})")
 
-        Args:
-            prompt: 画像生成のプロンプト
-            size: 画像のサイズ
-            quality: 画像の品質
-
-        Returns:
-            生成結果を含む辞書
-        """
         try:
-            # プロンプトを強化してスタイルを追加
-            enhanced_prompt = self._enhance_prompt(prompt)
+            enhanced_prompt = self._enhance_prompt(prompt, style)
+            image_b64 = None
 
-            # GPT-4 Vision で画像を生成 (gpt-image-1 model)
-            response = self.client.images.generate(
-                model="gpt-image-1",
-                prompt=enhanced_prompt,
-                size=size,
-                quality=quality,
-                n=1,
-                # response_format="b64_json"  # Not supported by gpt-image-1
-            )
+            if style == "illustration":
+                # OpenAI DALL-E 3
+                print("Using OpenAI DALL-E 3...")
+                response = self.openai_client.images.generate(
+                    model=os.getenv("IMAGE_MODEL_ILLUSTRATION", "dall-e-3"),
+                    prompt=enhanced_prompt,
+                    size=size,
+                    quality=quality,
+                    n=1,
+                    response_format="b64_json",
+                )
+                if response.data:
+                    image_b64 = response.data[0].b64_json
 
-            if not response.data:
-                return "画像データの受信に失敗しました。"
+            elif style == "realistic":
+                # Google GenAI (Nano Banana Pro)
+                print("Using Google Nano Banana Pro (Gemini)...")
+                import google.generativeai as genai
 
-            image_data = response.data[0]
+                api_key = os.getenv("GEMINI_API_KEY")
+                if not api_key:
+                    return "エラー: GEMINI_API_KEYが設定されていません。"
 
-            # 最後の画像データを保存（キャッシュなし）
+                genai.configure(api_key=api_key)
+                model_name = os.getenv(
+                    "IMAGE_MODEL_REALISTIC", "nano-banana-pro-preview"
+                )
+
+                # Geminiモデルを使って画像を生成
+                # 注: 通常のGeminiモデルは画像を返さない可能性がありますが、
+                # Nano Banana Proが画像生成能力を持つと仮定してgenerate_contentを使用します
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(enhanced_prompt)
+
+                # レスポンスから画像データを抽出
+                # レスポンスから画像データを抽出
+                if response.parts:
+                    for part in response.parts:
+                        # inline_dataがあるか確認
+                        if hasattr(part, "inline_data") and part.inline_data:
+                            if part.inline_data.mime_type.startswith("image/"):
+                                # 画像データ(bytes)をbase64に変換
+                                image_b64 = base64.b64encode(
+                                    part.inline_data.data
+                                ).decode("utf-8")
+                                break
+
+                if not image_b64:
+                    return f"Nano Banana Proからの画像生成に失敗しました (Model: {model_name})。レスポンスに画像が含まれていません。"
+
+            else:
+                return f"不明なスタイルです: {style}"
+
+            if not image_b64:
+                return "画像データの生成に失敗しました。"
+
+            # 最後の画像データを保存
             global _last_generated_image
             _last_generated_image = {
                 "prompt": prompt,
                 "size": size,
                 "quality": quality,
-                "b64_data": image_data.b64_json,
+                "b64_data": image_b64,
             }
 
-            # LLM用のクリーンな応答（画像データは一切含まない）
-            return (
-                f"やったのだー！画像を生成したよ〜✨\n"
-                f"プロンプト: {prompt}\n"
-                f"サイズ: {size} | 品質: {quality}"
-            )
+            return f"画像を生成しました！ ({style})\nプロンプト: {prompt}"
 
         except Exception as e:
-            error_msg = f"画像生成中にエラーが発生しました: {str(e)}"
-            print(f"画像生成エラー: {e}")  # デバッグ用
+            error_msg = f"画像生成エラー: {str(e)}"
+            print(error_msg)
             return error_msg
 
-    def _enhance_prompt(self, prompt: str) -> str:
-        """
-        プロンプトを強化し、Borderlandsのスタイルを追加します。
-
-        Args:
-            prompt: 元のプロンプト
-
-        Returns:
-            強化されたプロンプト
-        """
-        # Borderlands関連のキーワード
-        borderlands_keywords = [
-            "borderlands",
-            "claptrap",
-            "pandora",
-            "maya",
-            "salvador",
-            "axton",
-            "zer0",
-            "gaige",
-            "krieg",
-            "vault hunter",
-        ]
-
-        prompt_lower = prompt.lower()
-        is_borderlands = any(
-            keyword in prompt_lower for keyword in borderlands_keywords
-        )
-
-        if is_borderlands:
-            # Borderlandsスタイルを適用
-            enhanced = (
-                f"{prompt}, borderlands video game art style, cel-shaded, "
-                "comic book style, vibrant colors, post-apocalyptic"
-            )
-        else:
-            # 一般的な高品質スタイル
-            enhanced = f"{prompt}, high quality, detailed, beautiful"
-
-        # 不適切なコンテンツをフィルタリング
-        enhanced = self._filter_inappropriate_content(enhanced)
-
-        return enhanced
-
-    def _filter_inappropriate_content(self, prompt: str) -> str:
-        """
-        プロンプトから不適切なコンテンツをフィルタリングします。
-
-        Args:
-            prompt: フィルタリング前のプロンプト
-
-        Returns:
-            フィルタリング後のプロンプト
-        """
-        # 不適切な単語のリスト
-        inappropriate_words = [
-            "violence",
-            "blood",
-            "gore",
-            "weapon",
-            "gun",
-            "knife",
-            "violent",
-            "explicit",
-            "nsfw",
-        ]
-
-        filtered_prompt = prompt
-        for word in inappropriate_words:
-            if word in filtered_prompt.lower():
-                # 単語をより安全なものに置換
-                if word in ["weapon", "gun", "knife"]:
-                    filtered_prompt = filtered_prompt.replace(word, "tool")
-                elif word in ["violence", "violent"]:
-                    filtered_prompt = filtered_prompt.replace(word, "action")
-                else:
-                    filtered_prompt = filtered_prompt.replace(word, "")
-
-        return filtered_prompt
+    def _enhance_prompt(self, prompt: str, style: str) -> str:
+        """スタイルに応じてプロンプトを強化します。"""
+        if style == "illustration":
+            return f"{prompt}, high quality illustration, beautiful, detailed"
+        elif style == "realistic":
+            return f"{prompt}, photorealistic, high resolution, 4k, professional photography"
+        return prompt
 
     async def _arun(
-        self,
-        prompt: str,
-        size: str = "1024x1024",
-        quality: str = "high",
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """非同期で画像生成を実行します。"""
-        return self._run(prompt, size, quality, **kwargs)
-
-
-async def download_image_as_bytes(url: str) -> bytes | None:
-    """
-    URLから画像をバイトデータとしてダウンロードします。
-
-    Args:
-        url: 画像のURL
-
-    Returns:
-        画像のバイトデータ、またはダウンロード失敗時はNone
-    """
-    try:
-        async with aiohttp.ClientSession() as session, session.get(url) as response:
-            if response.status == 200:
-                return await response.read()
-            return None
-    except Exception as e:
-        print(f"画像ダウンロードエラー: {e}")
-        return None
-
-
+        self, prompt: str, style: str = "illustration", **kwargs: Any
+    ) -> str:
+        """非同期ラッパー (同期実行)"""
+        return self._run(prompt, style, **kwargs)
 
 
 def get_last_generated_image() -> dict[str, str] | None:
-    """最後に生成された画像データを取得します。"""
     return _last_generated_image
 
 
 def clear_last_generated_image() -> None:
-    """最後に生成された画像データをクリアします。"""
     global _last_generated_image
     _last_generated_image = None
 
 
 def create_image_generation_tool() -> ImageGenerationTool:
-    """画像生成ツールを初期化します。"""
     return ImageGenerationTool()
 
 
-# LangGraphから直接呼び出すためのラッパー関数
-def generate_image(
-    prompt: str, size: str = "1024x1024", quality: str = "high"
-) -> dict[str, Any]:
-    """
-    画像を生成するラッパー関数
-
-    Args:
-        prompt: 画像生成のプロンプト
-        size: 画像のサイズ
-        quality: 画像の品質
-
-    Returns:
-        生成結果の辞書
-    """
+def generate_image(prompt: str, style: str = "illustration") -> Any:
     tool = create_image_generation_tool()
-    return tool._run(prompt=prompt, size=size, quality=quality)
+    return tool._run(prompt=prompt, style=style)

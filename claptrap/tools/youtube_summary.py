@@ -8,7 +8,6 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
 
 
 class YouTubeSummaryInput(BaseModel):
@@ -43,7 +42,7 @@ class YouTubeSummaryTool(BaseTool):
                     ".envファイルに記述するか、環境変数を設定してください。"
                 )
             # Get model from environment variable, fallback to default
-            model = os.getenv("CLAUDE_AGENT_MODEL", "claude-3-5-sonnet-20241022")
+            model = os.getenv("CLAUDE_AGENT_MODEL", "claude-sonnet-4-20250514")
 
             self._llm = ChatAnthropic(
                 api_key=api_key,
@@ -107,8 +106,12 @@ class YouTubeSummaryTool(BaseTool):
         """
         try:
             print(f"動画 {video_id} の文字起こしを取得中...")
+
+            # 新しいAPI (youtube-transcript-api 1.0+) を使用
+            ytt_api = YouTubeTranscriptApi()
+
             # 利用可能な文字起こしリストを取得
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_list = ytt_api.list(video_id)
 
             # 指定された言語の文字起こしを検索
             transcript = None
@@ -126,20 +129,19 @@ class YouTubeSummaryTool(BaseTool):
             try:
                 transcript = transcript_list.find_transcript([language])
                 print(f"指定言語 '{language}' の文字起こしを取得")
-            except Exception as lang_error:
-                print(f"指定言語 '{language}' が見つからない: {str(lang_error)}")
+            except Exception:
+                print(f"指定言語 '{language}' が見つからない")
                 # 指定言語が見つからない場合、英語を試す
                 try:
                     transcript = transcript_list.find_transcript(["en"])
                     print("英語の文字起こしを使用")
-                except Exception as en_error:
-                    print(f"英語も見つからない: {str(en_error)}")
+                except Exception:
+                    print("英語も見つからない")
                     # 英語も見つからない場合、利用可能な最初の文字起こしを使用
                     if available_transcripts:
                         transcript = available_transcripts[0]
-                        print(
-                            f"利用可能な最初の文字起こし ({transcript.language_code}) を使用"
-                        )
+                        lang_code = transcript.language_code
+                        print(f"利用可能な最初の文字起こし ({lang_code}) を使用")
 
             if not transcript:
                 error_msg = (
@@ -150,11 +152,11 @@ class YouTubeSummaryTool(BaseTool):
                 return None, error_msg
 
             # 文字起こしデータを取得
-            transcript_data = None
             try:
-                print(f"文字起こしデータを取得中...")
-                transcript_data = transcript.fetch()
-                print(f"文字起こしデータを取得完了: {len(transcript_data)}エントリ")
+                print("文字起こしデータを取得中...")
+                # 新しいAPIではfetch()がFetchedTranscriptを返す
+                fetched_transcript = transcript.fetch()
+                print(f"文字起こしデータを取得完了: {len(fetched_transcript)}エントリ")
             except Exception as fetch_error:
                 fetch_error_msg = str(fetch_error)
                 if "no element found" in fetch_error_msg.lower():
@@ -162,34 +164,36 @@ class YouTubeSummaryTool(BaseTool):
                         f"動画 {video_id} の文字起こしデータが空または破損しています。"
                         f"詳細エラー: {fetch_error_msg}"
                     )
-                    print(error_msg)
-                    return None, error_msg
                 else:
                     error_msg = f"文字起こしデータの取得エラー: {fetch_error_msg}"
-                    print(error_msg)
-                    return None, error_msg
+                print(error_msg)
+                return None, error_msg
 
-            if not transcript_data:
+            if not fetched_transcript:
                 error_msg = f"動画 {video_id} の文字起こしデータが空でした"
                 print(error_msg)
                 return None, error_msg
 
             # テキスト形式にフォーマット
+            # 新しいAPIでは FetchedTranscript オブジェクトからテキストを抽出
             try:
                 print("文字起こしをテキスト形式にフォーマット中...")
-                formatter = TextFormatter()
-                formatted_transcript = formatter.format_transcript(transcript_data)
+                # FetchedTranscript はイテレーション可能
+                formatted_transcript = " ".join(
+                    snippet.text for snippet in fetched_transcript
+                )
                 print(f"フォーマット完了: {len(formatted_transcript)}文字")
                 return formatted_transcript, None
             except Exception as format_error:
                 print(f"文字起こしフォーマットエラー: {format_error}")
-                # フォーマッターが失敗した場合、手動で結合
+                # フォールバック: to_raw_data() を使用
                 try:
-                    print("手動フォーマットにフォールバック中...")
+                    print("to_raw_data() でフォールバック中...")
+                    raw_data = fetched_transcript.to_raw_data()
                     manual_transcript = " ".join(
-                        [item.get("text", "") for item in transcript_data]
+                        item.get("text", "") for item in raw_data
                     )
-                    print(f"手動フォーマット完了: {len(manual_transcript)}文字")
+                    print(f"フォールバック完了: {len(manual_transcript)}文字")
                     return manual_transcript, None
                 except Exception as manual_error:
                     error_msg = f"手動フォーマットも失敗: {str(manual_error)}"
@@ -398,7 +402,7 @@ def test_youtube_transcript(video_id: str) -> dict[str, Any]:
     """
     import traceback
 
-    result = {
+    result: dict[str, Any] = {
         "video_id": video_id,
         "has_transcripts": False,
         "available_languages": [],
@@ -410,12 +414,13 @@ def test_youtube_transcript(video_id: str) -> dict[str, Any]:
     }
 
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-
         print(f"動画 {video_id} の文字起こし情報を調査中...")
 
+        # 新しいAPI (youtube-transcript-api 1.0+) を使用
+        ytt_api = YouTubeTranscriptApi()
+
         # 利用可能な文字起こしをリスト
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = ytt_api.list(video_id)
         available_transcripts = list(transcript_list)
 
         if available_transcripts:
@@ -434,11 +439,16 @@ def test_youtube_transcript(video_id: str) -> dict[str, Any]:
             first_transcript = available_transcripts[0]
             try:
                 print(f"サンプルデータを取得中: {first_transcript.language_code}")
-                transcript_data = first_transcript.fetch()
-                if transcript_data:
-                    result["total_entries"] = len(transcript_data)
-                    result["transcript_sample"] = transcript_data[:3]  # 最初の3エントリ
-                    print(f"取得成功: {len(transcript_data)}エントリ")
+                # 新しいAPIではfetch()がFetchedTranscriptを返す
+                fetched_transcript = first_transcript.fetch()
+                if fetched_transcript:
+                    result["total_entries"] = len(fetched_transcript)
+                    # FetchedTranscript からサンプルを取得
+                    result["transcript_sample"] = [
+                        {"text": s.text, "start": s.start, "duration": s.duration}
+                        for s in list(fetched_transcript)[:3]
+                    ]
+                    print(f"取得成功: {len(fetched_transcript)}エントリ")
             except Exception as fetch_error:
                 error_detail = traceback.format_exc()
                 result["error"] = f"fetch_error: {str(fetch_error)}"

@@ -72,13 +72,33 @@ class ClapTrapAgent:
             memory_db_path: メモリデータベースのパス
         """
         self.memory = ConversationMemory(memory_db_path)
-        self.llm = self._create_llm()
+        # 2つのLLMを作成: チャット用とツール用
+        self.llm_chat = self._create_llm_chat()
+        self.llm_tools = self._create_llm_tools()
         self.tools = self._create_tools()
         self.graph = self._create_graph()
 
-    def _create_llm(self) -> ChatAnthropic | ChatOpenAI:
-        """LLMを初期化"""
-        if model := os.getenv("CLAUDE_AGENT_MODEL"):
+    def _create_venice_llm(self, model: str) -> ChatOpenAI:
+        """Venice LLMを作成するヘルパー"""
+        venice_key = os.getenv("VENICE_API_KEY")
+        if not venice_key:
+            raise ValueError("VENICE_API_KEY が設定されていません")
+        return ChatOpenAI(
+            api_key=venice_key,
+            base_url="https://api.venice.ai/api/v1",
+            model=model,
+            temperature=0.9,
+            max_tokens=1000,
+        )
+
+    def _create_llm_chat(self) -> ChatAnthropic | ChatOpenAI:
+        """チャット用LLMを初期化（アンセンサード優先）"""
+        if os.getenv("VENICE_API_KEY"):
+            # Venice uncensored model (Function Calling非対応)
+            return self._create_venice_llm(
+                os.getenv("VENICE_MODEL_CHAT", "venice-uncensored")
+            )
+        elif model := os.getenv("CLAUDE_AGENT_MODEL"):
             api_key = os.getenv("ANTHROPIC_API_KEY")
             if api_key:
                 return ChatAnthropic(
@@ -87,8 +107,7 @@ class ClapTrapAgent:
                     temperature=0.9,
                     max_tokens=2000,
                 )
-            else:
-                raise ValueError("ANTHROPIC_API_KEY が設定されていません")
+            raise ValueError("ANTHROPIC_API_KEY が設定されていません")
         elif model := os.getenv("OPENAI_AGENT_MODEL"):
             api_key = os.getenv("OPENAI_API_KEY")
             if api_key:
@@ -98,10 +117,19 @@ class ClapTrapAgent:
                     temperature=0.9,
                     max_tokens=2000,
                 )
-
         raise ValueError(
-            "ANTHROPIC_AGENT_MODEL または OPENAI_AGENT_MODEL が設定されていません"
+            "VENICE_API_KEY, CLAUDE_AGENT_MODEL, OPENAI_AGENT_MODEL のいずれかが必要です"
         )
+
+    def _create_llm_tools(self) -> ChatAnthropic | ChatOpenAI:
+        """ツール呼び出し用LLMを初期化（Function Calling対応）"""
+        if os.getenv("VENICE_API_KEY"):
+            # Venice with function calling support
+            return self._create_venice_llm(
+                os.getenv("VENICE_MODEL_TOOLS", "zai-org-glm-4.6")
+            )
+        # 他のプロバイダーはチャット用と同じ
+        return self._create_llm_chat()
 
     def _create_tools(self) -> list[BaseTool]:
         """利用可能なツールを作成"""
@@ -113,8 +141,11 @@ class ClapTrapAgent:
 
     def _create_graph(self) -> Any:
         """LangGraphを構築"""
-        # ツールをLLMにバインド
-        llm_with_tools = self.llm.bind_tools(self.tools)
+        # ツール用LLMにツールをバインド（Function Calling対応モデル）
+        llm_with_tools = self.llm_tools.bind_tools(self.tools)
+
+        # チャット用LLM（アンセンサード、ツールなし）
+        llm_chat = self.llm_chat
 
         # ツールノードを作成
         tool_node = ToolNode(self.tools)
@@ -161,8 +192,8 @@ class ClapTrapAgent:
                 f"ツール呼び出し回数={tool_calls_made}"
             )
 
-            # 既に1回ツールを呼び出している場合は終了
-            if tool_calls_made >= 1:
+            # 既に2回ツールを呼び出している場合は終了
+            if tool_calls_made >= 3:
                 print("ツール呼び出し上限に達したため終了")
                 return "end"
 
@@ -178,8 +209,12 @@ class ClapTrapAgent:
             """LLMを呼び出し"""
             channel_id = state["channel_id"]
             messages = state["messages"]
+            tool_calls_made = state.get("tool_calls_made", 0)
             print("=======")
             print(messages)
+
+            # ツール実行済みかどうかを判定
+            has_tool_results = any(isinstance(m, ToolMessage) for m in messages)
 
             # メモリからコンテキストを取得
             memory_context = self.memory.get_context_for_channel(channel_id)
@@ -189,77 +224,109 @@ class ClapTrapAgent:
             if memory_context:
                 system_prompt += f"\n\n=== 会話履歴 ===\n{memory_context}"
 
-            system_prompt += f"\n\n{FUNCTION_CALLING_INSTRUCTIONS}"
+            # ツールが必要な場合のみツール関連の指示を追加
+            if not has_tool_results:
+                system_prompt += f"\n\n{FUNCTION_CALLING_INSTRUCTIONS}"
+
+                # YouTube URLの検出をシステムプロンプトに含める
+                last_user_message = None
+                for msg in reversed(messages):
+                    if isinstance(msg, HumanMessage):
+                        last_user_message = msg
+                        break
+
+                if last_user_message:
+                    youtube_urls = extract_youtube_urls(last_user_message.content)
+                    if youtube_urls:
+                        system_prompt += (
+                            f"\n\n重要: ユーザーのメッセージにYouTube URL "
+                            f"({youtube_urls[0]}) が含まれています。"
+                            "summarize_youtube_videoツールを使って動画を要約してください。"
+                        )
 
             # ツール使用後の応答を保証する指示を追加
-            system_prompt += (
-                "\n\n**重要**: ツールを使用した後は、結果に関わらず必ず"
-                "ユーザーに対してClapTrapの性格で応答してください。ツールが失敗した場合も、"
-                "その旨を元気よく説明し、代替案を提案してください。"
-                "絶対に空の応答や無言は避けてください。"
-                "\n\n**ツール使用ルール**: 1回の会話では1つのツールのみ"
-                "使用してください。"
-                "ツールの結果を受け取ったら、必ずユーザーに回答して"
-                "会話を終了してください。複数のツールを連続で呼び出すことは避けてください。"
-            )
-
-            # YouTube URLの検出をシステムプロンプトに含める
-            last_user_message = None
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage):
-                    last_user_message = msg
-                    break
-
-            if last_user_message:
-                youtube_urls = extract_youtube_urls(last_user_message.content)
-                if youtube_urls:
-                    system_prompt += (
-                        f"\n\n重要: ユーザーのメッセージにYouTube URL "
-                        f"({youtube_urls[0]}) が含まれています。"
-                        "summarize_youtube_videoツールを使って動画を要約してください。"
-                    )
+            if has_tool_results:
+                system_prompt += (
+                    "\n\n**重要**: ツールの結果を元に、ユーザーに対して"
+                    "ClapTrapの性格で応答してください。"
+                    "絶対に空の応答や無言は避けてください。"
+                )
 
             # メッセージを構築（LangChainメッセージ形式を維持）
             formatted_messages = []
 
-            for msg in messages:
-                if isinstance(msg, HumanMessage):
-                    formatted_messages.append(HumanMessage(content=msg.content))
-                elif isinstance(msg, AIMessage):
-                    # AIMessageのtool_callsも保持
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        formatted_messages.append(
-                            AIMessage(content=msg.content, tool_calls=msg.tool_calls)
-                        )
-                    else:
-                        formatted_messages.append(AIMessage(content=msg.content))
-                elif isinstance(msg, ToolMessage):
-                    # ToolMessageのtool_call_idを保持
-                    if hasattr(msg, "tool_call_id"):
-                        formatted_messages.append(
-                            ToolMessage(
-                                content=msg.content, tool_call_id=msg.tool_call_id
+            # ツール結果がある場合（アンセンサードモデル用）
+            # -> ToolMessageはサポートされないので、ユーザーメッセージとして変換
+            if has_tool_results:
+                # 最初のユーザーメッセージを取得
+                user_content = ""
+                tool_results = []
+                for msg in messages:
+                    if isinstance(msg, HumanMessage):
+                        user_content = msg.content
+                    elif isinstance(msg, ToolMessage):
+                        tool_results.append(msg.content)
+
+                # ツール結果をシステムプロンプトに追加済みなので、
+                # シンプルにユーザーメッセージ + ツール結果を含める
+                combined_content = user_content
+                if tool_results:
+                    combined_content += "\n\n=== ツール実行結果 ===\n"
+                    combined_content += "\n".join(tool_results)
+
+                formatted_messages = [HumanMessage(content=combined_content)]
+            else:
+                # 通常のメッセージ処理（ツール対応モデル用）
+                for msg in messages:
+                    if isinstance(msg, HumanMessage):
+                        formatted_messages.append(HumanMessage(content=msg.content))
+                    elif isinstance(msg, AIMessage):
+                        # AIMessageのtool_callsも保持
+                        if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            formatted_messages.append(
+                                AIMessage(
+                                    content=msg.content, tool_calls=msg.tool_calls
+                                )
                             )
-                        )
-                    else:
-                        # tool_call_idがない場合はスキップ
-                        continue
+                        else:
+                            formatted_messages.append(AIMessage(content=msg.content))
+                    elif isinstance(msg, ToolMessage):
+                        # ToolMessageのtool_call_idを保持
+                        if hasattr(msg, "tool_call_id"):
+                            formatted_messages.append(
+                                ToolMessage(
+                                    content=msg.content, tool_call_id=msg.tool_call_id
+                                )
+                            )
 
             # 空のメッセージリストの場合はダミーメッセージを追加
             if not formatted_messages:
                 formatted_messages.append(HumanMessage(content="やあ"))
 
-            # OpenAI用とAnthropic用で異なる処理
-            if isinstance(self.llm, ChatOpenAI):
-                # OpenAIの場合はシステムメッセージを先頭に追加
+            # 使用するLLMを選択
+            # - ツール結果がある場合: llm_chat (アンセンサード) で応答生成
+            # - ツール結果がない場合: llm_with_tools (FC対応) でツール判定
+            if has_tool_results:
+                # アンセンサードモデルで応答生成
+                print(
+                    f"LLM選択: チャット用モデル (ツール実行済み: {tool_calls_made}回)"
+                )
                 messages_with_system = [
                     SystemMessage(content=system_prompt)
                 ] + formatted_messages
-                response = llm_with_tools.invoke(messages_with_system)
+                response = llm_chat.invoke(messages_with_system)
             else:
-                # Anthropicの場合はsystemパラメータを使用
-                llm_with_system = llm_with_tools.bind(system=system_prompt)
-                response = llm_with_system.invoke(formatted_messages)
+                # ツール対応モデルでツール判定
+                print("LLM選択: ツール用モデル (初回呼び出し)")
+                if isinstance(self.llm_tools, ChatOpenAI):
+                    messages_with_system = [
+                        SystemMessage(content=system_prompt)
+                    ] + formatted_messages
+                    response = llm_with_tools.invoke(messages_with_system)
+                else:
+                    # Anthropicの場合はsystemパラメータを使用
+                    llm_with_system = llm_with_tools.bind(system=system_prompt)
+                    response = llm_with_system.invoke(formatted_messages)
 
             # レスポンスの検証
             if not hasattr(response, "content") or not response.content:

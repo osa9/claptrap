@@ -78,11 +78,15 @@ class TestYouTubeSummaryTool:
         # モックの設定
         mock_transcript_list = Mock()
         mock_transcript = Mock()
+        mock_transcript.language_code = "ja"
         mock_transcript.fetch.return_value = [
             {"text": "Hello", "start": 0.0, "duration": 2.0},
             {"text": "World", "start": 2.0, "duration": 2.0},
         ]
         mock_transcript_list.find_transcript.return_value = mock_transcript
+
+        # イテレータのモックを設定
+        mock_transcript_list.__iter__ = Mock(return_value=iter([mock_transcript]))
 
         mock_api.list_transcripts.return_value = mock_transcript_list
 
@@ -96,7 +100,7 @@ class TestYouTubeSummaryTool:
 
             result = youtube_tool._get_transcript("test_video_id", "ja")
 
-            assert result == "Hello World"
+            assert result == ("Hello World", None)
             mock_api.list_transcripts.assert_called_once_with("test_video_id")
             mock_transcript_list.find_transcript.assert_called_once_with(["ja"])
 
@@ -107,9 +111,13 @@ class TestYouTubeSummaryTool:
         """日本語字幕がない場合の英語へのフォールバックテスト"""
         mock_transcript_list = Mock()
         mock_transcript = Mock()
+        mock_transcript.language_code = "en"
         mock_transcript.fetch.return_value = [
             {"text": "Hello", "start": 0.0, "duration": 2.0}
         ]
+
+        # イテレータのモック
+        mock_transcript_list.__iter__ = Mock(return_value=iter([mock_transcript]))
 
         # 日本語字幕は見つからず、英語字幕が見つかる
         mock_transcript_list.find_transcript.side_effect = [
@@ -128,7 +136,7 @@ class TestYouTubeSummaryTool:
 
             result = youtube_tool._get_transcript("test_video_id", "ja")
 
-            assert result == "Hello"
+            assert result == ("Hello", None)
             assert mock_transcript_list.find_transcript.call_count == 2
 
     @patch("claptrap.tools.youtube_summary.YouTubeTranscriptApi")
@@ -138,9 +146,11 @@ class TestYouTubeSummaryTool:
         """字幕が利用できない場合のテスト"""
         mock_api.list_transcripts.side_effect = Exception("No transcripts available")
 
-        result = youtube_tool._get_transcript("test_video_id", "ja")
+        result, error = youtube_tool._get_transcript("test_video_id", "ja")
 
         assert result is None
+        assert error is not None
+        assert "No transcripts available" in error
 
     def test_summarize_transcript(self, youtube_tool: YouTubeSummaryTool) -> None:
         """字幕要約のテスト"""
@@ -180,7 +190,7 @@ class TestYouTubeSummaryTool:
         with (
             patch.object(youtube_tool, "_extract_video_id", return_value="dQw4w9WgXcQ"),
             patch.object(
-                youtube_tool, "_get_transcript", return_value="Test transcript"
+                youtube_tool, "_get_transcript", return_value=("Test transcript", None)
             ),
             patch.object(
                 youtube_tool,
@@ -209,7 +219,11 @@ class TestYouTubeSummaryTool:
 
         with (
             patch.object(youtube_tool, "_extract_video_id", return_value="dQw4w9WgXcQ"),
-            patch.object(youtube_tool, "_get_transcript", return_value=None),
+            patch.object(
+                youtube_tool,
+                "_get_transcript",
+                return_value=(None, "文字起こしを取得できませんでした"),
+            ),
         ):
             result = youtube_tool._run(test_url)
 
@@ -356,6 +370,10 @@ class TestIntegration:
         ):
             # YouTubeTranscriptApiのモック設定
             mock_transcript_list = Mock()
+            mock_transcript_list.__iter__ = Mock(
+                return_value=iter([Mock(language_code="ja")])
+            )
+
             mock_transcript = Mock()
             mock_transcript.fetch.return_value = [
                 {"text": "Hello", "start": 0.0, "duration": 2.0},
@@ -405,6 +423,10 @@ class TestIntegration:
 
             # 字幕なしのテスト
             no_transcript_url = "https://www.youtube.com/watch?v=no_transcript"
-            with patch.object(tool, "_get_transcript", return_value=None):
+            with patch.object(
+                tool,
+                "_get_transcript",
+                return_value=(None, "文字起こしを取得できませんでした"),
+            ):
                 result = tool._run(no_transcript_url)
                 assert "文字起こしを取得できませんでした" in result
